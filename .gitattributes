@@ -1,0 +1,7 @@
+* text=auto eol=lf
+
+*.sh text eol=lf
+src/antigravity-bridge text eol=lf
+*.png binary
+*.icns binary
+*.zip binary

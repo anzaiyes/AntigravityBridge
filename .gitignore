@@ -1,0 +1,10 @@
+# macOS metadata
+.DS_Store
+._*
+
+# Generated release artifacts
+/dist/
+
+# Local logs and temporary files
+*.log
+*.tmp

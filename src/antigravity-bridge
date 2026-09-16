@@ -1,0 +1,551 @@
+#!/bin/bash
+
+set -u
+
+DEFAULT_CONFIG_ROOT="$HOME/Library/Application Support/Antigravity Bridge"
+LEGACY_CONFIG_ROOT="$HOME/Library/Application Support/Antigravity Proxy"
+CONFIG_ROOT="${ANTIGRAVITY_BRIDGE_CONFIG_DIR:-${ANTIGRAVITY_PROXY_CONFIG_DIR:-$DEFAULT_CONFIG_ROOT}}"
+CONFIG_FILE="$CONFIG_ROOT/config.plist"
+TEST_URL="https://www.gstatic.com/generate_204"
+ANTIGRAVITY_TEST_URL="https://daily-cloudcode-pa.googleapis.com/"
+BUNDLE_ID="com.google.antigravity-ide"
+MODE="${1:-launch}"
+
+CANDIDATE_SOURCE=()
+CANDIDATE_TYPE=()
+CANDIDATE_HOST=()
+CANDIDATE_PORT=()
+CANDIDATE_SCORE=()
+CANDIDATE_TARGET_OK=()
+
+show_alert() {
+  /usr/bin/osascript -l JavaScript - "$1" <<'JXA'
+function run(argv) {
+  const app = Application.currentApplication();
+  app.includeStandardAdditions = true;
+  app.displayAlert("Antigravity Bridge", {
+    message: argv[0],
+    buttons: ["好"],
+    defaultButton: "好"
+  });
+}
+JXA
+}
+
+is_valid_port() {
+  [[ "$1" =~ ^[0-9]+$ ]] && (( $1 >= 1 && $1 <= 65535 ))
+}
+
+proxy_is_usable() {
+  local proxy_type="$1"
+  local proxy_host="$2"
+  local proxy_port="$3"
+  local proxy_url
+
+  is_valid_port "$proxy_port" || return 1
+  /usr/bin/nc -z -w 1 "$proxy_host" "$proxy_port" >/dev/null 2>&1 || return 1
+
+  case "$proxy_type" in
+    http) proxy_url="http://${proxy_host}:${proxy_port}" ;;
+    socks5) proxy_url="socks5h://${proxy_host}:${proxy_port}" ;;
+    *) return 1 ;;
+  esac
+
+  /usr/bin/curl -sS --connect-timeout 2 --max-time 4 \
+    --proxy "$proxy_url" -o /dev/null "$TEST_URL" >/dev/null 2>&1
+}
+
+proxy_reaches_antigravity() {
+  local proxy_type="$1"
+  local proxy_host="$2"
+  local proxy_port="$3"
+  local proxy_url
+
+  case "$proxy_type" in
+    http) proxy_url="http://${proxy_host}:${proxy_port}" ;;
+    socks5) proxy_url="socks5h://${proxy_host}:${proxy_port}" ;;
+    *) return 1 ;;
+  esac
+
+  /usr/bin/curl -sS --connect-timeout 2 --max-time 4 \
+    --proxy "$proxy_url" -o /dev/null "$ANTIGRAVITY_TEST_URL" >/dev/null 2>&1
+}
+
+build_proxy_urls() {
+  local proxy_type="$1"
+  local proxy_host="$2"
+  local proxy_port="$3"
+
+  ENV_PROXY_URL="http://${proxy_host}:${proxy_port}"
+  CHROMIUM_PROXY_URL="$ENV_PROXY_URL"
+  if [[ "$proxy_type" == "socks5" ]]; then
+    ENV_PROXY_URL="socks5h://${proxy_host}:${proxy_port}"
+    CHROMIUM_PROXY_URL="socks5://${proxy_host}:${proxy_port}"
+  fi
+}
+
+score_candidate() {
+  local source="$1"
+  local proxy_type="$2"
+  local proxy_host="$3"
+  local target_ok="$4"
+  local score=0
+
+  [[ "$target_ok" == "1" ]] && ((score += 100))
+  [[ "$proxy_type" == "http" ]] && ((score += 30))
+  [[ "$proxy_host" == "127.0.0.1" || "$proxy_host" == "localhost" || "$proxy_host" == "::1" ]] && ((score += 10))
+
+  case "$source" in
+    "macOS 系统代理") ((score += 20)) ;;
+    Clash*|Surge*|Mihomo*) ((score += 15)) ;;
+  esac
+
+  printf '%s\n' "$score"
+}
+
+recommended_candidate_index() {
+  local index best_index=0
+  [[ "${#CANDIDATE_PORT[@]}" -gt 0 ]] || return 1
+  for ((index = 1; index < ${#CANDIDATE_PORT[@]}; index++)); do
+    if (( CANDIDATE_SCORE[index] > CANDIDATE_SCORE[best_index] )); then
+      best_index="$index"
+    fi
+  done
+  printf '%s\n' "$best_index"
+}
+
+add_candidate() {
+  local source="$1"
+  local proxy_type="$2"
+  local proxy_host="$3"
+  local proxy_port="$4"
+  local index target_ok score
+
+  [[ "$proxy_host" == "0.0.0.0" || "$proxy_host" == "*" ]] && proxy_host="127.0.0.1"
+  [[ -z "$proxy_host" ]] && proxy_host="127.0.0.1"
+  is_valid_port "$proxy_port" || return 0
+
+  for ((index = 0; index < ${#CANDIDATE_PORT[@]}; index++)); do
+    if [[ "${CANDIDATE_TYPE[$index]}" == "$proxy_type" && \
+          "${CANDIDATE_HOST[$index]}" == "$proxy_host" && \
+          "${CANDIDATE_PORT[$index]}" == "$proxy_port" ]]; then
+      return 0
+    fi
+  done
+
+  proxy_is_usable "$proxy_type" "$proxy_host" "$proxy_port" || return 0
+  CANDIDATE_SOURCE+=("$source")
+  CANDIDATE_TYPE+=("$proxy_type")
+  CANDIDATE_HOST+=("$proxy_host")
+  CANDIDATE_PORT+=("$proxy_port")
+  target_ok="0"
+  proxy_reaches_antigravity "$proxy_type" "$proxy_host" "$proxy_port" && target_ok="1"
+  score="$(score_candidate "$source" "$proxy_type" "$proxy_host" "$target_ok")"
+  CANDIDATE_TARGET_OK+=("$target_ok")
+  CANDIDATE_SCORE+=("$score")
+}
+
+parse_clash_config() {
+  local source="$1"
+  local config_file="$2"
+  local proxy_type proxy_port
+
+  [[ -r "$config_file" ]] || return 0
+  while IFS='|' read -r proxy_type proxy_port; do
+    [[ -n "$proxy_type" ]] && add_candidate "$source" "$proxy_type" "127.0.0.1" "$proxy_port"
+  done < <(/usr/bin/awk '
+    /^mixed-port:[[:space:]]*[0-9]+/ { print "http|" $2 }
+    /^port:[[:space:]]*[0-9]+/       { print "http|" $2 }
+    /^socks-port:[[:space:]]*[0-9]+/ { print "socks5|" $2 }
+  ' "$config_file")
+}
+
+parse_surge_profile() {
+  local profile_file="$1"
+  local proxy_type proxy_host proxy_port
+
+  [[ -r "$profile_file" ]] || return 0
+  while IFS='|' read -r proxy_type proxy_host proxy_port; do
+    [[ -n "$proxy_type" ]] && add_candidate "Surge" "$proxy_type" "$proxy_host" "$proxy_port"
+  done < <(/usr/bin/awk -F= '
+    function trim(value) {
+      gsub(/^[ \t]+|[ \t]+$/, "", value)
+      return value
+    }
+    /^[ \t]*http-listen[ \t]*=/ || /^[ \t]*socks5-listen[ \t]*=/ {
+      kind = ($1 ~ /socks5/) ? "socks5" : "http"
+      value = trim($2)
+      split(value, listeners, ",")
+      for (i in listeners) {
+        listener = trim(listeners[i])
+        sub(/^.*@/, "", listener)
+        count = split(listener, parts, ":")
+        host = (count > 1) ? parts[1] : "127.0.0.1"
+        port = (count > 1) ? parts[count] : ((kind == "http") ? "6152" : "6153")
+        print kind "|" host "|" port
+      }
+    }
+  ' "$profile_file")
+}
+
+discover_system_proxy() {
+  local proxy_dump enabled host port
+  proxy_dump="$(/usr/sbin/scutil --proxy 2>/dev/null || true)"
+
+  enabled="$(printf '%s\n' "$proxy_dump" | /usr/bin/awk '$1 == "HTTPEnable" { print $3; exit }')"
+  if [[ "$enabled" == "1" ]]; then
+    host="$(printf '%s\n' "$proxy_dump" | /usr/bin/awk '$1 == "HTTPProxy" { print $3; exit }')"
+    port="$(printf '%s\n' "$proxy_dump" | /usr/bin/awk '$1 == "HTTPPort" { print $3; exit }')"
+    add_candidate "macOS 系统代理" "http" "$host" "$port"
+  fi
+
+  enabled="$(printf '%s\n' "$proxy_dump" | /usr/bin/awk '$1 == "HTTPSEnable" { print $3; exit }')"
+  if [[ "$enabled" == "1" ]]; then
+    host="$(printf '%s\n' "$proxy_dump" | /usr/bin/awk '$1 == "HTTPSProxy" { print $3; exit }')"
+    port="$(printf '%s\n' "$proxy_dump" | /usr/bin/awk '$1 == "HTTPSPort" { print $3; exit }')"
+    add_candidate "macOS 系统代理" "http" "$host" "$port"
+  fi
+
+  enabled="$(printf '%s\n' "$proxy_dump" | /usr/bin/awk '$1 == "SOCKSEnable" { print $3; exit }')"
+  if [[ "$enabled" == "1" ]]; then
+    host="$(printf '%s\n' "$proxy_dump" | /usr/bin/awk '$1 == "SOCKSProxy" { print $3; exit }')"
+    port="$(printf '%s\n' "$proxy_dump" | /usr/bin/awk '$1 == "SOCKSPort" { print $3; exit }')"
+    add_candidate "macOS 系统代理" "socks5" "$host" "$port"
+  fi
+}
+
+discover_proxy_candidates() {
+  local profile
+  CANDIDATE_SOURCE=()
+  CANDIDATE_TYPE=()
+  CANDIDATE_HOST=()
+  CANDIDATE_PORT=()
+  CANDIDATE_SCORE=()
+  CANDIDATE_TARGET_OK=()
+
+  discover_system_proxy
+  parse_clash_config "Clash Verge" "$HOME/Library/Application Support/io.github.clash-verge-rev.clash-verge-rev/config.yaml"
+  parse_clash_config "Clash Verge" "$HOME/Library/Application Support/io.github.clash-verge-rev.clash-verge-rev/clash-verge.yaml"
+  parse_clash_config "ClashX" "$HOME/.config/clash/config.yaml"
+  parse_clash_config "ClashX Meta" "$HOME/.config/clash.meta/config.yaml"
+  parse_clash_config "Mihomo Party" "$HOME/.config/mihomo-party/config.yaml"
+  parse_clash_config "ClashX" "$HOME/Library/Application Support/com.west2online.ClashX/config.yaml"
+
+  if [[ -d "$HOME/Library/Application Support/Surge/Profiles" ]]; then
+    while IFS= read -r profile; do
+      parse_surge_profile "$profile"
+    done < <(/usr/bin/find "$HOME/Library/Application Support/Surge/Profiles" -maxdepth 2 -type f -name '*.conf' 2>/dev/null)
+  fi
+
+  if [[ -d "/Applications/Clash Verge.app" || -d "/Applications/ClashX.app" || \
+        -d "$HOME/Applications/Clash Verge.app" || -d "$HOME/Applications/ClashX.app" ]]; then
+    add_candidate "Clash 常用端口" "http" "127.0.0.1" "7890"
+    add_candidate "Clash 常用端口" "http" "127.0.0.1" "7897"
+    add_candidate "Clash 常用端口" "socks5" "127.0.0.1" "7891"
+  fi
+
+  if [[ -d "/Applications/Surge.app" || -d "$HOME/Applications/Surge.app" ]]; then
+    add_candidate "Surge 常用端口" "http" "127.0.0.1" "6152"
+    add_candidate "Surge 常用端口" "socks5" "127.0.0.1" "6153"
+  fi
+}
+
+choose_manual_proxy() {
+  local friendly_type manual_port
+  friendly_type="$(/usr/bin/osascript -l JavaScript <<'JXA'
+function run() {
+  const app = Application.currentApplication();
+  app.includeStandardAdditions = true;
+  const result = app.chooseFromList(["HTTP / Mixed", "SOCKS5"], {
+    withTitle: "Antigravity Bridge",
+    withPrompt: "选择代理类型",
+    defaultItems: ["HTTP / Mixed"]
+  });
+  return result ? result[0] : "";
+}
+JXA
+)" || return 1
+  [[ -n "$friendly_type" ]] || return 1
+
+  manual_port="$(/usr/bin/osascript -l JavaScript <<'JXA'
+function run() {
+  const app = Application.currentApplication();
+  app.includeStandardAdditions = true;
+  try {
+    return app.displayDialog("输入本机代理监听端口：", {
+      withTitle: "Antigravity Bridge",
+      defaultAnswer: "7890",
+      buttons: ["取消", "确定"],
+      defaultButton: "确定",
+      cancelButton: "取消"
+    }).textReturned;
+  } catch (error) {
+    return "";
+  }
+}
+JXA
+)"
+  is_valid_port "$manual_port" || {
+    show_alert "端口必须是 1 到 65535 之间的数字。"
+    return 1
+  }
+
+  SELECTED_TYPE="http"
+  [[ "$friendly_type" == "SOCKS5" ]] && SELECTED_TYPE="socks5"
+  SELECTED_HOST="127.0.0.1"
+  SELECTED_PORT="$manual_port"
+  SELECTED_SOURCE="手动配置"
+
+  if ! proxy_is_usable "$SELECTED_TYPE" "$SELECTED_HOST" "$SELECTED_PORT"; then
+    show_alert "127.0.0.1:${SELECTED_PORT} 未通过 ${friendly_type} 代理验证。请确认代理软件及监听端口后重试。"
+    return 1
+  fi
+}
+
+choose_proxy_candidate() {
+  local labels=()
+  local label_indices=()
+  local manual_label="手动配置…"
+  local chosen type_label index best_index=0 recommendation_reason display_index
+
+  if [[ "${#CANDIDATE_PORT[@]}" -gt 0 ]]; then
+    best_index="$(recommended_candidate_index)"
+    type_label="HTTP / Mixed"
+    [[ "${CANDIDATE_TYPE[$best_index]}" == "socks5" ]] && type_label="SOCKS5"
+    labels+=("★ 推荐：${CANDIDATE_SOURCE[$best_index]} — ${type_label} — ${CANDIDATE_HOST[$best_index]}:${CANDIDATE_PORT[$best_index]}")
+    label_indices+=("$best_index")
+
+    for ((index = 0; index < ${#CANDIDATE_PORT[@]}; index++)); do
+      [[ "$index" -eq "$best_index" ]] && continue
+      type_label="HTTP / Mixed"
+      [[ "${CANDIDATE_TYPE[$index]}" == "socks5" ]] && type_label="SOCKS5"
+      labels+=("${CANDIDATE_SOURCE[$index]} — ${type_label} — ${CANDIDATE_HOST[$index]}:${CANDIDATE_PORT[$index]}")
+      label_indices+=("$index")
+    done
+  fi
+
+  if [[ "${#CANDIDATE_PORT[@]}" -eq 0 ]]; then
+    recommendation_reason="没有检测到已验证的代理，请选择“手动配置…”。"
+  elif [[ "${CANDIDATE_TARGET_OK[$best_index]}" == "1" && "${CANDIDATE_TYPE[$best_index]}" == "http" ]]; then
+    recommendation_reason="推荐项已通过 Antigravity 目标端点验证；HTTP/Mixed 对 Go 后端与 Chromium 的兼容性通常最好。"
+  elif [[ "${CANDIDATE_TARGET_OK[$best_index]}" == "1" ]]; then
+    recommendation_reason="推荐项已通过 Antigravity 目标端点验证，是当前可用候选中评分最高的一项。"
+  elif [[ "${CANDIDATE_TYPE[$best_index]}" == "http" ]]; then
+    recommendation_reason="推荐项已通过基础代理验证；HTTP/Mixed 对 Go 后端与 Chromium 的兼容性通常更好。"
+  else
+    recommendation_reason="推荐项已通过基础代理验证，是当前可用候选中评分最高的一项。"
+  fi
+
+  chosen="$(/usr/bin/osascript -l JavaScript - "$recommendation_reason" "${labels[@]}" "$manual_label" <<'JXA'
+function run(argv) {
+  const app = Application.currentApplication();
+  app.includeStandardAdditions = true;
+  const recommendationReason = argv.shift();
+  const proxyChoices = argv;
+  const result = app.chooseFromList(proxyChoices, {
+    withTitle: "Antigravity Bridge",
+    withPrompt: recommendationReason,
+    defaultItems: [proxyChoices[0]],
+    okButtonName: "使用所选代理",
+    cancelButtonName: "取消"
+  });
+  return result ? result[0] : "";
+}
+JXA
+)" || return 1
+  [[ -n "$chosen" ]] || return 1
+
+  if [[ "$chosen" == "$manual_label" ]]; then
+    choose_manual_proxy
+    return $?
+  fi
+
+  for ((display_index = 0; display_index < ${#labels[@]}; display_index++)); do
+    if [[ "${labels[$display_index]}" == "$chosen" ]]; then
+      index="${label_indices[$display_index]}"
+      SELECTED_SOURCE="${CANDIDATE_SOURCE[$index]}"
+      SELECTED_TYPE="${CANDIDATE_TYPE[$index]}"
+      SELECTED_HOST="${CANDIDATE_HOST[$index]}"
+      SELECTED_PORT="${CANDIDATE_PORT[$index]}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+verify_antigravity_bundle() {
+  local candidate="$1"
+  local identifier
+  [[ -d "$candidate" && -r "$candidate/Contents/Info.plist" ]] || return 1
+  identifier="$(/usr/bin/plutil -extract CFBundleIdentifier raw "$candidate/Contents/Info.plist" 2>/dev/null || true)"
+  [[ "$identifier" == "$BUNDLE_ID" ]]
+}
+
+find_antigravity() {
+  local candidate
+  for candidate in "/Applications/Antigravity IDE.app" "$HOME/Applications/Antigravity IDE.app" \
+    "/Applications/Antigravity.app" "$HOME/Applications/Antigravity.app"; do
+    if verify_antigravity_bundle "$candidate"; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+
+  while IFS= read -r candidate; do
+    if verify_antigravity_bundle "$candidate"; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done < <(/usr/bin/mdfind "kMDItemCFBundleIdentifier == '$BUNDLE_ID'" 2>/dev/null)
+
+  candidate="$(/usr/bin/osascript -l JavaScript <<'JXA'
+function run() {
+  const app = Application.currentApplication();
+  app.includeStandardAdditions = true;
+  try {
+    const selected = app.chooseApplication({
+      withTitle: "Antigravity Bridge",
+      withPrompt: "请选择 Antigravity IDE 应用",
+      as: "alias"
+    });
+    return selected.toString();
+  } catch (error) {
+    return "";
+  }
+}
+JXA
+)"
+  candidate="${candidate%/}"
+  if verify_antigravity_bundle "$candidate"; then
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+  return 1
+}
+
+read_config_value() {
+  /usr/bin/plutil -extract "$1" raw "$CONFIG_FILE" 2>/dev/null
+}
+
+migrate_legacy_config() {
+  [[ "$CONFIG_ROOT" == "$DEFAULT_CONFIG_ROOT" ]] || return 0
+  [[ ! -e "$CONFIG_FILE" && -r "$LEGACY_CONFIG_ROOT/config.plist" ]] || return 0
+
+  /bin/mkdir -p "$CONFIG_ROOT" || return 1
+  /bin/cp "$LEGACY_CONFIG_ROOT/config.plist" "$CONFIG_FILE" || return 1
+  /bin/chmod 600 "$CONFIG_FILE"
+}
+
+load_saved_config() {
+  [[ -r "$CONFIG_FILE" ]] || return 1
+  SELECTED_TYPE="$(read_config_value proxy_type || true)"
+  SELECTED_HOST="$(read_config_value proxy_host || true)"
+  SELECTED_PORT="$(read_config_value proxy_port || true)"
+  SELECTED_SOURCE="$(read_config_value proxy_source || true)"
+  ANTIGRAVITY_PATH="$(read_config_value antigravity_path || true)"
+
+  [[ "$SELECTED_TYPE" == "http" || "$SELECTED_TYPE" == "socks5" ]] || return 1
+  [[ -n "$SELECTED_HOST" ]] || return 1
+  is_valid_port "$SELECTED_PORT" || return 1
+  verify_antigravity_bundle "$ANTIGRAVITY_PATH" || return 1
+  proxy_is_usable "$SELECTED_TYPE" "$SELECTED_HOST" "$SELECTED_PORT"
+}
+
+save_config() {
+  local temp_file
+  /bin/mkdir -p "$CONFIG_ROOT" || return 1
+  temp_file="$(/usr/bin/mktemp "$CONFIG_ROOT/config.XXXXXX")" || return 1
+  /usr/bin/plutil -create xml1 "$temp_file" || return 1
+  /usr/bin/plutil -insert config_version -integer 2 "$temp_file"
+  /usr/bin/plutil -insert proxy_type -string "$SELECTED_TYPE" "$temp_file"
+  /usr/bin/plutil -insert proxy_host -string "$SELECTED_HOST" "$temp_file"
+  /usr/bin/plutil -insert proxy_port -integer "$SELECTED_PORT" "$temp_file"
+  /usr/bin/plutil -insert proxy_source -string "$SELECTED_SOURCE" "$temp_file"
+  /usr/bin/plutil -insert antigravity_path -string "$ANTIGRAVITY_PATH" "$temp_file"
+  /bin/chmod 600 "$temp_file"
+  /bin/mv -f "$temp_file" "$CONFIG_FILE"
+}
+
+configure() {
+  ANTIGRAVITY_PATH="$(find_antigravity || true)"
+  if [[ -z "$ANTIGRAVITY_PATH" ]]; then
+    show_alert "没有找到有效的 Antigravity IDE。请先安装应用，或在选择窗口中指定它。"
+    return 1
+  fi
+
+  discover_proxy_candidates
+  choose_proxy_candidate || return 1
+  save_config || {
+    show_alert "无法把配置保存到：${CONFIG_FILE}"
+    return 1
+  }
+}
+
+print_diagnostics() {
+  local index antigravity_path best_index=0 recommended=""
+  antigravity_path="$(find_antigravity || true)"
+  printf 'Antigravity: %s\n' "${antigravity_path:-未找到}"
+  discover_proxy_candidates
+  printf '已验证代理数量: %s\n' "${#CANDIDATE_PORT[@]}"
+  [[ "${#CANDIDATE_PORT[@]}" -gt 0 ]] && best_index="$(recommended_candidate_index)"
+  for ((index = 0; index < ${#CANDIDATE_PORT[@]}; index++)); do
+    recommended=""
+    [[ "$index" -eq "$best_index" ]] && recommended="★ 推荐"
+    printf '%s\t%s\t%s\t目标=%s\t评分=%s\t%s://%s:%s\n' \
+      "$recommended" "${CANDIDATE_SOURCE[$index]}" "${CANDIDATE_TYPE[$index]}" \
+      "${CANDIDATE_TARGET_OK[$index]}" "${CANDIDATE_SCORE[$index]}" "${CANDIDATE_TYPE[$index]}" \
+      "${CANDIDATE_HOST[$index]}" "${CANDIDATE_PORT[$index]}"
+  done
+}
+
+if [[ "${ANTIGRAVITY_PROXY_LIBRARY_ONLY:-0}" == "1" ]]; then
+  return 0 2>/dev/null || exit 0
+fi
+
+if [[ "$MODE" == "--diagnose" ]]; then
+  print_diagnostics
+  exit 0
+fi
+
+if [[ "$MODE" == "--configure" ]]; then
+  configure
+  exit $?
+fi
+
+migrate_legacy_config || {
+  show_alert "无法迁移旧版 Antigravity Proxy 配置，将重新进行代理配置。"
+}
+
+if ! load_saved_config; then
+  configure || exit 0
+fi
+
+app_running="$(/usr/bin/osascript -e 'application "Antigravity IDE" is running' 2>/dev/null || true)"
+if [[ "$app_running" == "true" ]]; then
+  show_alert "Antigravity 已在运行，无法为现有进程补加代理。请先用 Command-Q 完全退出 Antigravity，再点击本启动器。"
+  exit 1
+fi
+
+build_proxy_urls "$SELECTED_TYPE" "$SELECTED_HOST" "$SELECTED_PORT"
+
+/usr/bin/open \
+  --env "HTTP_PROXY=$ENV_PROXY_URL" \
+  --env "HTTPS_PROXY=$ENV_PROXY_URL" \
+  --env "ALL_PROXY=$ENV_PROXY_URL" \
+  --env "http_proxy=$ENV_PROXY_URL" \
+  --env "https_proxy=$ENV_PROXY_URL" \
+  --env "all_proxy=$ENV_PROXY_URL" \
+  --env "NO_PROXY=localhost,127.0.0.1,::1" \
+  --env "no_proxy=localhost,127.0.0.1,::1" \
+  -a "$ANTIGRAVITY_PATH" \
+  --args \
+  "--proxy-server=$CHROMIUM_PROXY_URL" \
+  '--proxy-bypass-list=<local>;localhost;127.0.0.1;[::1]'
+
+status=$?
+if [[ $status -ne 0 ]]; then
+  show_alert "Antigravity 启动失败，状态码：${status}。"
+  exit "$status"
+fi
+
+exit 0

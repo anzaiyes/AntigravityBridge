@@ -1,0 +1,50 @@
+name: Bug 报告
+description: 报告可以稳定复现的问题
+title: '[Bug] '
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: 请勿在公开 Issue 中提交凭据、真实代理配置或安全漏洞细节。
+  - type: input
+    id: version
+    attributes:
+      label: 版本
+      placeholder: 例如 2.2.0
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS 版本与芯片
+      placeholder: 例如 macOS 15.6 / Apple Silicon
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: 问题描述
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      placeholder: 请提供最小、可重复的步骤，并隐藏端口以外的敏感信息。
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: 诊断信息
+      description: 可提供 --diagnose 输出，请先移除用户名、路径或其他隐私信息。
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我已确认 Antigravity 已完全退出后再启动。
+          required: true
+        - label: 我没有在此 Issue 中披露凭据或漏洞利用细节。
+          required: true

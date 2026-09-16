@@ -1,0 +1,36 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-14
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install ShellCheck
+        run: brew install shellcheck
+
+      - name: Test
+        run: ./tests/run-tests.sh
+
+      - name: Build release assets
+        run: ./scripts/package.sh "$GITHUB_REF_NAME"
+
+      - name: Publish unnotarized release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            dist/Antigravity-Bridge-"$GITHUB_REF_NAME"-unsigned.zip \
+            dist/SHA256SUMS \
+            --title "$GITHUB_REF_NAME（未公证）" \
+            --generate-notes \
+            --notes "此版本采用 ad-hoc 签名，尚未经过 Apple Developer ID 签名或 Apple 公证。请核对 SHA256SUMS，并阅读 README 中的 Gatekeeper 说明。"
