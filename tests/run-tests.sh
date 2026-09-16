@@ -1,5 +1,10 @@
 #!/bin/bash
 
+# The launcher is sourced in library mode below. ShellCheck cannot infer that
+# the guard returns instead of exiting, or that stub functions are called by
+# functions loaded from the sourced file.
+# shellcheck disable=SC2317,SC2329
+
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -31,7 +36,7 @@ assert_file_equal() {
 
 export ANTIGRAVITY_PROXY_LIBRARY_ONLY=1
 export ANTIGRAVITY_BRIDGE_CONFIG_DIR="$TEST_TMP/config"
-# shellcheck source=../src/antigravity-bridge
+# shellcheck disable=SC1091
 source "$ROOT_DIR/src/antigravity-bridge"
 unset ANTIGRAVITY_PROXY_LIBRARY_ONLY
 

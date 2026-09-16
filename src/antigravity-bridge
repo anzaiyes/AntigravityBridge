@@ -325,7 +325,7 @@ choose_proxy_candidate() {
   fi
 
   if [[ "${#CANDIDATE_PORT[@]}" -eq 0 ]]; then
-    recommendation_reason="没有检测到已验证的代理，请选择“手动配置…”。"
+    recommendation_reason='没有检测到已验证的代理，请选择“手动配置…”。'
   elif [[ "${CANDIDATE_TARGET_OK[$best_index]}" == "1" && "${CANDIDATE_TYPE[$best_index]}" == "http" ]]; then
     recommendation_reason="推荐项已通过 Antigravity 目标端点验证；HTTP/Mixed 对 Go 后端与 Chromium 的兼容性通常最好。"
   elif [[ "${CANDIDATE_TARGET_OK[$best_index]}" == "1" ]]; then
@@ -499,7 +499,10 @@ print_diagnostics() {
 }
 
 if [[ "${ANTIGRAVITY_PROXY_LIBRARY_ONLY:-0}" == "1" ]]; then
-  return 0 2>/dev/null || exit 0
+  if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+    return 0
+  fi
+  exit 0
 fi
 
 if [[ "$MODE" == "--diagnose" ]]; then
