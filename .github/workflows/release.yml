@@ -31,6 +31,6 @@ jobs:
           gh release create "$GITHUB_REF_NAME" \
             dist/Antigravity-Bridge-"$GITHUB_REF_NAME"-unsigned.zip \
             dist/SHA256SUMS \
-            --title "$GITHUB_REF_NAME（未公证）" \
+            --title "${GITHUB_REF_NAME} (Unnotarized)" \
             --generate-notes \
             --notes "此版本采用 ad-hoc 签名，尚未经过 Apple Developer ID 签名或 Apple 公证。请核对 SHA256SUMS，并阅读 README 中的 Gatekeeper 说明。"
