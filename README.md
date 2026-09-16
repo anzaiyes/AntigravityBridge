@@ -24,7 +24,7 @@ Antigravity Bridge 是一个轻量的 macOS 启动器：自动识别本机 HTTP/
 
 ## 安装
 
-1. 从 GitHub Releases 下载 `.dmg` 或 `.zip` 安装包以及 `SHA256SUMS`。DMG 中可以直接将 App 拖入 `Applications`。
+1. 从 GitHub Releases 下载安装包以及 `SHA256SUMS`。若该版本提供 `.dmg`，可以在镜像中直接将 App 拖入 `Applications`；否则下载 `.zip` 并解压。
 2. 核对下载文件的 SHA-256：
 
    ```bash
