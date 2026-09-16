@@ -111,11 +111,14 @@ assert_file_equal "$ROOT_DIR/packaging/Info.plist" \
 PACKAGE_DIST="$TEST_TMP/package"
 DIST_DIR="$PACKAGE_DIST" "$ROOT_DIR/scripts/package.sh" v2.2.0 >/dev/null
 ZIP_FILE="$PACKAGE_DIST/Antigravity-Bridge-v2.2.0-unsigned.zip"
+DMG_FILE="$PACKAGE_DIST/Antigravity-Bridge-v2.2.0-unsigned.dmg"
 /usr/bin/unzip -t "$ZIP_FILE" >/dev/null
 if /usr/bin/unzip -Z1 "$ZIP_FILE" | /usr/bin/grep -E '(^|/)(__MACOSX|\.DS_Store|\._)' >/dev/null; then
   printf 'FAIL: release ZIP contains macOS metadata\n' >&2
   exit 1
 fi
+/usr/bin/hdiutil verify "$DMG_FILE" >/dev/null
+/usr/bin/hdiutil imageinfo "$DMG_FILE" >/dev/null
 (
   cd "$PACKAGE_DIST"
   /usr/bin/shasum -a 256 -c SHA256SUMS >/dev/null

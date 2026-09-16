@@ -30,6 +30,7 @@ jobs:
         run: |
           gh release create "$GITHUB_REF_NAME" \
             dist/Antigravity-Bridge-"$GITHUB_REF_NAME"-unsigned.zip \
+            dist/Antigravity-Bridge-"$GITHUB_REF_NAME"-unsigned.dmg \
             dist/SHA256SUMS \
             --title "${GITHUB_REF_NAME} (Unnotarized)" \
             --generate-notes \
